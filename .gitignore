@@ -1,0 +1,5 @@
+Backend/backend/.env
+Backend/backend/go.mod
+Backend/backend/go.sum
+
+Backend/backend/*.exe

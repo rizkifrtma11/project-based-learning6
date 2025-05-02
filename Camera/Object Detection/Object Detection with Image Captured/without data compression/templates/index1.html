@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLOv8 Person Counter</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            text-align: center;
+        }
+
+        h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 20px;
+        }
+
+        img {
+            border: 5px solid #4CAF50;
+            border-radius: 10px;
+            box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
+            width: 95%;  /* Gambar lebih besar sedikit lagi (95%) */
+            max-width: 100%;  /* Agar gambar tetap responsif */
+            height: auto;  /* Mempertahankan rasio aspek */
+        }
+
+        /* Responsiveness for mobile view */
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2em;
+            }
+
+            img {
+                width: 90%; /* Gambar lebih besar untuk tampilan mobile */
+            }
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <h1>YOLOv8 Person Counter</h1>
+        <img src="{{ url_for('video_feed') }}">
+    </div>
+</body>
+</html>
