@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kamera MQTT Web</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <h2>Live Kamera dari MQTT</h2>
+    <div>
+        <button onclick="toggleLiveView()">Toggle Live View</button>
+        <button onclick="zoom('in')">Zoom In (+)</button>
+        <button onclick="zoom('out')">Zoom Out (-)</button>
+    </div>
+    <div id="status">Live View: OFF</div>
+    <img id="videoFeed" src="/video_feed" width="640" height="480" />
+    <script>
+        function toggleLiveView() {
+            fetch('/toggle', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById("status").innerText = "Live View: " + (data.status ? "ON" : "OFF");
+                });
+        }
+
+        function zoom(direction) {
+            fetch('/zoom', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({direction: direction})
+            }).then(res => res.json())
+              .then(data => {
+                console.log("Zoom factor:", data.zoom_factor);
+              });
+        }
+    </script>
+</body>
+</html>
