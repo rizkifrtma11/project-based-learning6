@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Live Streaming & Status Sistem</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+            padding: 20px;
+        }
+
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+
+        img {
+            display: block;
+            margin: 0 auto;
+            border: 4px solid #3498db;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+
+        .status-box {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+
+        .status-info p {
+            font-size: 16px;
+            margin: 8px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th, td {
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #2980b9;
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background-color: #ecf0f1;
+        }
+
+        #proc-list {
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+
+    <script>
+        async function loadSystemInfo() {
+            try {
+                const response = await fetch('/system_status');
+                const data = await response.json();
+
+                document.getElementById('cpu').textContent = data.cpu_percent + '%';
+                document.getElementById('memory').textContent =
+                    data.memory_used.toFixed(1) + ' MB / ' + data.memory_total.toFixed(1) + ' MB';
+
+                const rows = data.processes.slice(0, 5).map(proc => `
+                    <tr>
+                        <td>${proc.name}</td>
+                        <td>${proc.pid}</td>
+                        <td>${proc.cpu_percent}%</td>
+                        <td>${proc.memory_used.toFixed(1)} MB</td>
+                    </tr>
+                `).join('');
+                document.getElementById('proc-list').innerHTML = rows;
+
+            } catch (err) {
+                console.error('Gagal memuat system status:', err);
+            }
+        }
+
+        setInterval(loadSystemInfo, 3000);
+        window.onload = loadSystemInfo;
+    </script>
+</head>
+<body>
+
+    <h1>Live Streaming Kamera</h1>
+    <img src="/video_feed" width="640" height="480" alt="Streaming Video">
+
+    <div class="status-box">
+        <h2>Status Sistem Raspberry Pi</h2>
+        <div class="status-info">
+            <p><strong>CPU Usage:</strong> <span id="cpu">-</span></p>
+            <p><strong>Memory Usage:</strong> <span id="memory">-</span></p>
+        </div>
+
+        <h3>Top 5 Proses Aktif</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Nama Proses</th>
+                    <th>PID</th>
+                    <th>CPU</th>
+                    <th>Memory</th>
+                </tr>
+            </thead>
+            <tbody id="proc-list">
+                <tr><td colspan="4">Memuat...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+</body>
+</html>
