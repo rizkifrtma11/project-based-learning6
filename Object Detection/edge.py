@@ -8,19 +8,25 @@ import psutil
 import platform
 import subprocess
 from ultralytics import YOLO
+from datetime import datetime
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
 
 camera_lock = threading.Lock()
 cap = cv2.VideoCapture(0)
-model = YOLO("yolov8n.pt")  # Load YOLOv8n model
+model = YOLO("yolov8n.pt")  # Gunakan YOLOv8n
 
 if not cap.isOpened():
     print("[ERROR] Kamera tidak bisa dibuka.")
     exit()
 
+# Log jumlah orang per jam
+people_log = defaultdict(int)
+
 def gen_frames():
+    global people_log
     while True:
         with camera_lock:
             success, frame = cap.read()
@@ -28,20 +34,25 @@ def gen_frames():
             print("[WARNING] Gagal membaca frame streaming.")
             break
 
-        # YOLOv8 expects RGB images
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = model(rgb_frame, verbose=False)[0]
 
         count = 0
         for box in results.boxes:
             cls = int(box.cls[0])
-            if cls == 0:  # class 0 is 'person'
+            if cls == 0:  # class 'person'
                 count += 1
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f'Person', (x1, y1 - 10),
+                cv2.putText(frame, 'Person', (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+        # Update log jumlah orang
+        now = datetime.now()
+        hour_str = now.strftime('%Y-%m-%d %H:00')  # Format jam
+        people_log[hour_str] += count
+
+        # Tampilkan jumlah orang di frame
         cv2.putText(frame, f'People Count: {count}', (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
@@ -103,6 +114,10 @@ def system_status():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/people_log')
+def get_people_log():
+    return jsonify(dict(people_log))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
