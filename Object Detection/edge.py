@@ -12,18 +12,16 @@ from collections import defaultdict
 
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
-# ============ Flask Setup =============
 app = Flask(__name__)
 CORS(app)
 
 camera_lock = threading.Lock()
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # pake DirectShow di Windows
 
 if not cap.isOpened():
     print("[ERROR] Kamera tidak bisa dibuka.")
     exit()
 
-# ============ Load MobileNet SSD ============
 PROTO_PATH = "mobilenet_ssd/MobileNetSSD_deploy.prototxt"
 MODEL_PATH = "mobilenet_ssd/MobileNetSSD_deploy.caffemodel"
 net = cv2.dnn.readNetFromCaffe(PROTO_PATH, MODEL_PATH)
@@ -32,17 +30,31 @@ CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
            "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
            "sofa", "train", "tvmonitor"]
 
-# ============ DeepSORT Tracker ============
 tracker = DeepSort(max_age=40)
 
-# ============ Logging =============
 people_log = defaultdict(int)
 last_log_time = None
 
-# ============ Frame Generator ============
+recording = False
+last_record_time = 0
+record_duration = 10   # detik
+record_cooldown = 15   # detik
+
+def record_video(frames, width, height, filename):
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(filename, fourcc, 20.0, (width, height))
+    for frame in frames:
+        out.write(frame)
+    out.release()
+
 def gen_frames():
-    global people_log, last_log_time
+    global people_log, last_log_time, recording, last_record_time
+
     unique_ids_in_interval = set()
+    record_frames = []
+    recording_active = False
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     while True:
         with camera_lock:
@@ -101,13 +113,36 @@ def gen_frames():
             unique_ids_in_interval.clear()
             last_log_time = current_time
 
+        # Logika rekam video
+        if people_count > 0:
+            if not recording:
+                # cek cooldown
+                if current_time - last_record_time > record_cooldown:
+                    recording = True
+                    recording_active = True
+                    record_frames = []
+                    print("[INFO] Mulai rekam video...")
+        if recording:
+            record_frames.append(frame.copy())
+            # cek durasi record
+            if len(record_frames) >= record_duration * 20:  # fps 20
+                recording = False
+                last_record_time = current_time
+                recording_active = False
+                # simpan video di thread terpisah supaya gak blocking
+                folder = now.strftime("%Y-%m-%d")
+                if not os.path.exists(f"videos/{folder}"):
+                    os.makedirs(f"videos/{folder}")
+                filename = f"videos/{folder}/record_{now.strftime('%H%M%S')}.avi"
+                threading.Thread(target=record_video, args=(record_frames, w_ori, h_ori, filename)).start()
+                print(f"[INFO] Rekaman selesai dan disimpan: {filename}")
+
         ret, buffer = cv2.imencode('.jpg', frame)
         frame_jpg = buffer.tobytes()
+
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_jpg + b'\r\n')
 
-
-# ============ Routes =============
 
 @app.route('/')
 def index():
