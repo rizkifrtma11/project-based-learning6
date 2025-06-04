@@ -25,14 +25,15 @@ if not cap.isOpened():
     exit()
 
 # Inisialisasi DeepSORT tracker
-tracker = DeepSort(max_age=10)  # max_age untuk berapa lama object tetap di-track tanpa update
+tracker = DeepSort(max_age=40)  # max_age untuk berapa lama object tetap di-track tanpa update
 
 people_log = defaultdict(int)
 last_log_minute = None
 
 def gen_frames():
     global people_log, last_log_time
-    last_log_time = None  # inisialisasi waktu log terakhir
+    last_log_time = None  # waktu log terakhir
+    unique_ids_in_interval = set()  # menyimpan track_id orang unik di interval 30 detik
 
     while True:
         with camera_lock:
@@ -41,10 +42,8 @@ def gen_frames():
             print("[WARNING] Gagal membaca frame streaming.")
             break
 
-        # Ukuran asli frame
         h_ori, w_ori = frame.shape[:2]
 
-        # Resize frame untuk proses deteksi/tracking
         frame_resized = cv2.resize(frame, (640, 360))
         rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
 
@@ -58,7 +57,6 @@ def gen_frames():
                 conf = box.conf[0].item()
                 detections.append(([x1, y1, x2, y2], conf, 'person'))
 
-        # Update tracker dengan frame yang di-resize
         tracks = tracker.update_tracks(detections, frame=frame_resized)
 
         people_count = 0
@@ -66,17 +64,17 @@ def gen_frames():
             if not track.is_confirmed():
                 continue
             track_id = track.track_id
-            ltrb = track.to_ltrb()  # left, top, right, bottom di frame kecil
+            unique_ids_in_interval.add(track_id)  # simpan id unik tiap orang yang terdeteksi
+
+            ltrb = track.to_ltrb()
             x1, y1, x2, y2 = ltrb
 
-            # Scale bounding box ke frame asli
             x1 = int(x1 * w_ori / 640)
             y1 = int(y1 * h_ori / 360)
             x2 = int(x2 * w_ori / 640)
             y2 = int(y2 * h_ori / 360)
 
             people_count += 1
-            # Draw box dan label di frame asli
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, f'ID {track_id}', (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
@@ -84,13 +82,15 @@ def gen_frames():
         cv2.putText(frame, f'People Count: {people_count}', (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-        # Logging setiap 20 detik berdasarkan people_count yang ter-track
         now = datetime.now()
         current_time = int(now.timestamp())
 
-        if last_log_time is None or (current_time - last_log_time) >= 20:
+        # Log setiap 30 detik
+        if last_log_time is None or (current_time - last_log_time) >= 30:
             hour_str = now.strftime('%Y-%m-%d %H:00')
-            people_log[hour_str] += people_count
+            # Tambahkan jumlah orang unik selama 30 detik ini ke log
+            people_log[hour_str] += len(unique_ids_in_interval)
+            unique_ids_in_interval.clear()  # reset untuk interval berikutnya
             last_log_time = current_time
 
         ret, buffer = cv2.imencode('.jpg', frame)
