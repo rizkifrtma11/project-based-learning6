@@ -66,6 +66,22 @@ def record_video(frames, width, height, filename):
         out.write(frame)
     out.release()
 
+def compress_video(input_path, output_path):
+    print(f"[INFO] Kompresi video: {input_path} -> {output_path}")
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-vcodec", "libx264",
+            "-crf", "28",  # semakin tinggi, semakin kecil file (20–28 ideal)
+            output_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.remove(input_path)
+        print(f"[INFO] Kompresi selesai. File asli dihapus: {input_path}")
+    except Exception as e:
+        print(f"[ERROR] Kompresi gagal: {e}")
+
 def gen_frames():
     global people_log, last_log_time, recording, last_record_time
 
@@ -139,7 +155,7 @@ def gen_frames():
             unique_ids_in_interval.clear()
             last_log_time = current_time
 
-        # Rekam video jika ada orang
+        # Mulai merekam jika terdeteksi orang
         if people_count > 0 and not recording:
             if current_time - last_record_time > record_cooldown:
                 recording = True
@@ -155,9 +171,14 @@ def gen_frames():
                 recording_active = False
                 folder = now.strftime("%Y-%m-%d")
                 os.makedirs(f"videos/{folder}", exist_ok=True)
-                filename = f"videos/{folder}/record_{now.strftime('%H%M%S')}.avi"
-                threading.Thread(target=record_video, args=(record_frames, w_ori, h_ori, filename)).start()
-                print(f"[INFO] Rekaman selesai dan disimpan: {filename}")
+                filename_avi = f"videos/{folder}/record_{now.strftime('%H%M%S')}.avi"
+                filename_mp4 = filename_avi.replace(".avi", ".mp4")
+
+                def record_and_compress(frames, width, height, avi_path, mp4_path):
+                    record_video(frames, width, height, avi_path)
+                    compress_video(avi_path, mp4_path)
+                threading.Thread(target=record_and_compress, args=(record_frames, w_ori, h_ori, filename_avi, filename_mp4)).start()    
+                print(f"[INFO] Rekaman selesai, kompresi ke: {filename_mp4}")
 
         ret, buffer = cv2.imencode('.jpg', frame)
         frame_jpg = buffer.tobytes()
