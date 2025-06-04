@@ -10,13 +10,35 @@ import subprocess
 from datetime import datetime
 from collections import defaultdict
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
+# ===== Firebase Setup =====
+cred = credentials.Certificate("firebase.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+def get_record_settings():
+    try:
+        doc_ref = db.collection("pillboox").document("camera")
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            record_duration = int(data.get("record", 10))
+            record_cooldown = int(data.get("pause", 15))
+            return record_duration, record_cooldown
+    except Exception as e:
+        print(f"[ERROR] Gagal mengambil setting Firestore: {e}")
+    return 10, 15
+
+# ===== Flask App =====
 app = Flask(__name__)
 CORS(app)
 
 camera_lock = threading.Lock()
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # pake DirectShow di Windows
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 if not cap.isOpened():
     print("[ERROR] Kamera tidak bisa dibuka.")
@@ -31,14 +53,11 @@ CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
            "sofa", "train", "tvmonitor"]
 
 tracker = DeepSort(max_age=40)
-
 people_log = defaultdict(int)
 last_log_time = None
 
 recording = False
 last_record_time = 0
-record_duration = 10   # detik
-record_cooldown = 15   # detik
 
 def record_video(frames, width, height, filename):
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
@@ -56,12 +75,19 @@ def gen_frames():
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    record_duration, record_cooldown = get_record_settings()
+    last_settings_check = time.time()
+
     while True:
         with camera_lock:
             success, frame = cap.read()
         if not success:
             print("[WARNING] Gagal membaca frame streaming.")
             break
+
+        if time.time() - last_settings_check > 10:
+            record_duration, record_cooldown = get_record_settings()
+            last_settings_check = time.time()
 
         h_ori, w_ori = frame.shape[:2]
         frame_resized = cv2.resize(frame, (640, 360))
@@ -113,36 +139,30 @@ def gen_frames():
             unique_ids_in_interval.clear()
             last_log_time = current_time
 
-        # Logika rekam video
-        if people_count > 0:
-            if not recording:
-                # cek cooldown
-                if current_time - last_record_time > record_cooldown:
-                    recording = True
-                    recording_active = True
-                    record_frames = []
-                    print("[INFO] Mulai rekam video...")
+        # Rekam video jika ada orang
+        if people_count > 0 and not recording:
+            if current_time - last_record_time > record_cooldown:
+                recording = True
+                recording_active = True
+                record_frames = []
+                print("[INFO] Mulai rekam video...")
+
         if recording:
             record_frames.append(frame.copy())
-            # cek durasi record
-            if len(record_frames) >= record_duration * 20:  # fps 20
+            if len(record_frames) >= record_duration * 20:
                 recording = False
                 last_record_time = current_time
                 recording_active = False
-                # simpan video di thread terpisah supaya gak blocking
                 folder = now.strftime("%Y-%m-%d")
-                if not os.path.exists(f"videos/{folder}"):
-                    os.makedirs(f"videos/{folder}")
+                os.makedirs(f"videos/{folder}", exist_ok=True)
                 filename = f"videos/{folder}/record_{now.strftime('%H%M%S')}.avi"
                 threading.Thread(target=record_video, args=(record_frames, w_ori, h_ori, filename)).start()
                 print(f"[INFO] Rekaman selesai dan disimpan: {filename}")
 
         ret, buffer = cv2.imencode('.jpg', frame)
         frame_jpg = buffer.tobytes()
-
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_jpg + b'\r\n')
-
 
 @app.route('/')
 def index():
@@ -157,24 +177,17 @@ def system_status():
     try:
         cpu_load = psutil.cpu_percent(interval=1)
         cpu_freq = psutil.cpu_freq().current
-
         mem = psutil.virtual_memory()
         memory_used = mem.used / (1024 ** 2)
         memory_total = mem.total / (1024 ** 2)
         memory_percent = mem.percent
-
         cpu_temp = None
-        try:
-            if platform.system() == 'Linux':
-                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                    cpu_temp = int(f.read()) / 1000.0
-        except Exception:
-            cpu_temp = None
-
+        if platform.system() == 'Linux':
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                cpu_temp = int(f.read()) / 1000.0
         load_avg = os.getloadavg() if hasattr(os, 'getloadavg') else (0, 0, 0)
         uptime_seconds = time.time() - psutil.boot_time()
         uptime = time.strftime("%H:%M:%S", time.gmtime(uptime_seconds))
-
         try:
             ping = subprocess.check_output(["ping", "-c", "1", "8.8.8.8"], universal_newlines=True)
             latency_line = [line for line in ping.split("\n") if "time=" in line][0]
