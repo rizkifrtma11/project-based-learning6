@@ -22,7 +22,7 @@ db = firestore.client()
 
 def get_record_settings():
     try:
-        doc_ref = db.collection("pillboox").document("camera")
+        doc_ref = db.collection("pillbox").document("camera")
         doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict()
