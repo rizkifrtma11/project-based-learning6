@@ -1,113 +1,60 @@
-from flask import Flask, Response, render_template, jsonify
-from flask_cors import CORS
+from flask import Flask, render_template, Response, jsonify
 import cv2
+import torch
+from ultralytics import YOLO
 import threading
-import time
 import os
+import time
 import psutil
 import platform
 import subprocess
-from datetime import datetime
-from collections import defaultdict
 
-from deep_sort_realtime.deepsort_tracker import DeepSort
-
-# ============ Flask Setup =============
 app = Flask(__name__)
-CORS(app)
 
-camera_lock = threading.Lock()
+# Load YOLOv8n model (people detection only)
+model = YOLO("yolov8n.pt")
+model.fuse()
+
+# Setup camera
 cap = cv2.VideoCapture(0)
-
 if not cap.isOpened():
-    print("[ERROR] Kamera tidak bisa dibuka.")
-    exit()
+    raise RuntimeError("[ERROR] Kamera tidak bisa dibuka.")
 
-# ============ Load MobileNet SSD ============
-PROTO_PATH = "mobilenet_ssd/MobileNetSSD_deploy.prototxt"
-MODEL_PATH = "mobilenet_ssd/MobileNetSSD_deploy.caffemodel"
-net = cv2.dnn.readNetFromCaffe(PROTO_PATH, MODEL_PATH)
-CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-           "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-           "sofa", "train", "tvmonitor"]
+# Folder video
+VIDEO_FOLDER = "./videos"
+os.makedirs(VIDEO_FOLDER, exist_ok=True)
 
-# ============ DeepSORT Tracker ============
-tracker = DeepSort(max_age=40)
+# Shared variable for people count
+people_count = 0
+frame_lock = threading.Lock()
 
-# ============ Logging =============
-people_log = defaultdict(int)
-last_log_time = None
-
-# ============ Frame Generator ============
 def gen_frames():
-    global people_log, last_log_time
-    unique_ids_in_interval = set()
-
+    global people_count
     while True:
-        with camera_lock:
-            success, frame = cap.read()
+        success, frame = cap.read()
         if not success:
-            print("[WARNING] Gagal membaca frame streaming.")
             break
 
-        h_ori, w_ori = frame.shape[:2]
-        frame_resized = cv2.resize(frame, (640, 360))
+        results = model(frame, verbose=False)[0]
 
-        blob = cv2.dnn.blobFromImage(frame_resized, 0.007843, (300, 300), 127.5)
-        net.setInput(blob)
-        detections = net.forward()
+        # Ambil hanya bbox dengan class == 0 (person)
+        person_indices = (results.boxes.cls == 0)
+        results.boxes = results.boxes[person_indices]
 
-        det_list = []
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > 0.5:
-                idx = int(detections[0, 0, i, 1])
-                if CLASSES[idx] == "person":
-                    box = detections[0, 0, i, 3:7] * [640, 360, 640, 360]
-                    (x1, y1, x2, y2) = box.astype("int")
-                    det_list.append(([x1, y1, x2, y2], confidence, 'person'))
+        # Hitung orang
+        count = len(results.boxes)
 
-        tracks = tracker.update_tracks(det_list, frame=frame_resized)
+        with frame_lock:
+            people_count = count
 
-        people_count = 0
-        for track in tracks:
-            if not track.is_confirmed():
-                continue
-            track_id = track.track_id
-            unique_ids_in_interval.add(track_id)
+        # Gambar hasil hanya untuk person
+        annotated = results.plot()
 
-            ltrb = track.to_ltrb()
-            x1, y1, x2, y2 = map(int, ltrb)
-            x1 = int(x1 * w_ori / 640)
-            y1 = int(y1 * h_ori / 360)
-            x2 = int(x2 * w_ori / 640)
-            y2 = int(y2 * h_ori / 360)
+        ret, buffer = cv2.imencode('.jpg', annotated)
+        frame_bytes = buffer.tobytes()
 
-            people_count += 1
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f'ID {track_id}', (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        cv2.putText(frame, f'People Count: {people_count}', (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        now = datetime.now()
-        current_time = int(now.timestamp())
-
-        if last_log_time is None or datetime.now().hour != datetime.fromtimestamp(last_log_time).hour:
-            hour_str = now.strftime('%Y-%m-%d %H:00')
-            people_log[hour_str] += len(unique_ids_in_interval)
-            unique_ids_in_interval.clear()
-            last_log_time = current_time
-
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame_jpg = buffer.tobytes()
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_jpg + b'\r\n')
-
-
-# ============ Routes =============
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 @app.route('/')
 def index():
@@ -117,12 +64,17 @@ def index():
 def video_feed():
     return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+@app.route('/people_count')
+def get_people_count():
+    with frame_lock:
+        count = people_count
+    return jsonify({"people_count": count})
+
 @app.route('/system_status')
 def system_status():
     try:
         cpu_load = psutil.cpu_percent(interval=1)
         cpu_freq = psutil.cpu_freq().current
-
         mem = psutil.virtual_memory()
         memory_used = mem.used / (1024 ** 2)
         memory_total = mem.total / (1024 ** 2)
@@ -162,9 +114,28 @@ def system_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/people_log')
-def get_people_log():
-    return jsonify(dict(people_log))
+@app.route('/video_gallery')
+def video_gallery():
+    return render_template('gallery.html')
+
+@app.route('/videos/list')
+def list_videos():
+    try:
+        files = [f for f in os.listdir(VIDEO_FOLDER) if f.endswith(('.mp4', '.avi'))]
+        return jsonify({"video_files": files})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/videos/list/<date>')
+def list_videos_by_date(date):
+    folder = os.path.join(VIDEO_FOLDER, date)
+    try:
+        if not os.path.exists(folder):
+            return jsonify({"video_files": []})
+        files = [f for f in os.listdir(folder) if f.endswith(('.mp4', '.avi'))]
+        return jsonify({"video_files": files})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
