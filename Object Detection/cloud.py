@@ -289,6 +289,23 @@ def list_available_dates():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/path_live', methods=['GET'])
+def get_live_link():
+    try:
+        doc_ref = db.collection('pillbox').document('live')
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            link = data.get('link', None)
+            if link:
+                return jsonify({"link": link}), 200
+            else:
+                return jsonify({"error": "Field 'link' tidak ditemukan"}), 404
+        else:
+            return jsonify({"error": "Dokumen 'live' tidak ditemukan"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/videos/camera', methods=['POST'])
 def update_duration():
     valid, resp, code = verify_request()
