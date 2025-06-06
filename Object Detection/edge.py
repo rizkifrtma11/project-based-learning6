@@ -1,85 +1,309 @@
-from flask import Flask, render_template, Response, jsonify
+from flask import Flask, Response, render_template, jsonify
+from flask_cors import CORS
 import cv2
-import torch
-from ultralytics import YOLO
 import threading
-import os
 import time
+import requests
+import os
 import psutil
 import platform
 import subprocess
+import socket
+import firebase_admin
+from firebase_admin import credentials, firestore
+import hmac
+import hashlib
 
 app = Flask(__name__)
+CORS(app)
 
-# Load YOLOv8n model (people detection only)
-model = YOLO("yolov8n.pt")
-model.fuse()
-
-# Setup camera
+camera_lock = threading.Lock()
 cap = cv2.VideoCapture(0)
+
 if not cap.isOpened():
-    raise RuntimeError("[ERROR] Kamera tidak bisa dibuka.")
+    print("[ERROR] Kamera tidak bisa dibuka.")
+    exit()
 
-# Folder video
-VIDEO_FOLDER = "./videos"
-os.makedirs(VIDEO_FOLDER, exist_ok=True)
+# Konfigurasi
+RECORD_DURATION = 10
+ONLINE_SLEEP_DURATION = 15
+OFFLINE_SLEEP_DURATION = 15
+PENDING_FOLDER = "./videos_pending"
+os.makedirs(PENDING_FOLDER, exist_ok=True)
 
-# Shared variable for people count
-people_count = 0
-frame_lock = threading.Lock()
+SERVER_UPLOAD_URL = "https://pillbox-server-263713026348.asia-southeast2.run.app/videos"
 
-def gen_frames():
-    global people_count
+# Secret key HMAC (harus sama dengan yang di server)
+SECRET_KEY = b"pillboxpnj234"  # byte string
+
+# Firebase setup
+cred = credentials.Certificate("firebase.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+def is_connected(host="8.8.8.8", port=53, timeout=3):
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        return True
+    except socket.error:
+        return False
+
+def generate_hmac(filename):
+    """
+    Generate HMAC SHA256 dari isi file video.
+    """
+    h = hmac.new(SECRET_KEY, digestmod=hashlib.sha256)
+    with open(filename, 'rb') as f:
+        while True:
+            chunk = f.read(4096)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+def upload_video(filename):
+    try:
+        if not is_connected():
+            raise ConnectionError("Tidak ada koneksi sebelum mulai upload.")
+
+        # HMAC v1 setup
+        key_id = "v1"
+        timestamp = str(int(time.time()))
+        message = f"{key_id}:{timestamp}".encode()
+
+        # HMAC-SHA256 signature dari pesan "v1:timestamp"
+        signature = hmac.new(SECRET_KEY, message, hashlib.sha256).hexdigest()
+
+        # Header HMAC
+        headers = {
+            'X-Key-Id': key_id,
+            'X-Timestamp': timestamp,
+            'X-Signature': signature
+        }
+
+        # Kirim file video dengan headers HMAC
+        with open(filename, 'rb') as f:
+            files = {'video': f}
+            response = requests.post(SERVER_UPLOAD_URL, files=files, headers=headers, timeout=120)
+
+        if response.status_code == 200:
+            print("[UPLOAD SUCCESS]", response.text)
+            return True
+        else:
+            print("[UPLOAD FAILED] Status code:", response.status_code)
+            print("Response:", response.text)
+            return False
+
+    except (requests.exceptions.RequestException, ConnectionError) as e:
+        print("[UPLOAD ERROR] Koneksi gagal selama upload:", str(e))
+        return False
+
+    except Exception as e:
+        print("[UPLOAD ERROR] Error lain:", str(e))
+        return False
+
+
+def upload_pending_files():
+    print("[INFO] Mengecek file offline untuk diupload...")
     while True:
-        success, frame = cap.read()
-        if not success:
+        files = sorted(os.listdir(PENDING_FOLDER))
+        if not files:
+            print("[INFO] Folder pending sudah kosong, semua file berhasil diupload.")
             break
 
-        results = model(frame, verbose=False)[0]
+        for f in files:
+            file_path = os.path.join(PENDING_FOLDER, f)
+            if os.path.isfile(file_path):
+                print(f"[UPLOAD PENDING] Mencoba upload {f}...")
+                if upload_video(file_path):
+                    os.remove(file_path)
+                    print(f"[UPLOAD PENDING] Berhasil upload dan hapus {f}")
+                else:
+                    print(f"[UPLOAD PENDING] Gagal upload {f}, retry setelah delay...")
+                    time.sleep(10)  # delay sebelum retry dari awal
+                    break  # keluar dari for untuk ulang loop while lagi
+        else:
+            # Jika for selesai tanpa break berarti semua file berhasil diupload
+            continue
 
-        # Ambil hanya bbox dengan class == 0 (person)
-        person_indices = (results.boxes.cls == 0)
-        results.boxes = results.boxes[person_indices]
+def record_video(duration, filepath):
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    with camera_lock:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    out = cv2.VideoWriter(filepath, fourcc, 20.0, (width, height))
 
-        # Hitung orang
-        count = len(results.boxes)
+    start_time = time.time()
+    while time.time() - start_time < duration:
+        with camera_lock:
+            ret, frame = cap.read()
+        if not ret:
+            print("[WARNING] Gagal membaca frame saat rekaman.")
+            break
+        out.write(frame)
+    out.release()
 
-        with frame_lock:
-            people_count = count
+def record_video_loop():
+    retry_interval = 120  # 2 menit
+    last_retry_time = 0
+    prev_connected = None
 
-        # Gambar hasil hanya untuk person
-        annotated = results.plot()
+    while True:
+        connected = is_connected()
 
-        ret, buffer = cv2.imencode('.jpg', annotated)
-        frame_bytes = buffer.tobytes()
+        if prev_connected is None:
+            prev_connected = connected
+        elif prev_connected != connected:
+            if connected:
+                print("[FAILOVER] Koneksi PULIH (offline ? online)")
+                upload_pending_files()
+            else:
+                print("[FAILOVER] Koneksi HILANG (online ? offline)")
+            prev_connected = connected
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        print(f"[INFO] Koneksi internet: {'TERHUBUNG' if connected else 'TIDAK TERHUBUNG'}")
+
+        current_time = time.time()
+
+        if connected:
+            # Tambahkan cek upload file offline rutin setiap retry_interval saat online
+            if current_time - last_retry_time >= retry_interval:
+                print("[INFO] Waktu retry upload file offline (online mode)...")
+                last_retry_time = current_time
+                upload_pending_files()
+
+            try:
+                doc_ref = db.collection('pillbox').document('camera')
+                doc = doc_ref.get()
+                if doc.exists:
+                    config = doc.to_dict()
+                    record_duration = int(config.get('record', RECORD_DURATION))
+                    pause_duration = int(config.get('pause', ONLINE_SLEEP_DURATION))
+                else:
+                    print("[WARNING] Dokumen Firestore tidak ditemukan. Gunakan default.")
+                    record_duration = RECORD_DURATION
+                    pause_duration = ONLINE_SLEEP_DURATION
+            except Exception as e:
+                print("[FIRESTORE ERROR]", str(e))
+                record_duration = RECORD_DURATION
+                pause_duration = ONLINE_SLEEP_DURATION
+
+            filename = "output.avi"
+            print(f"[INFO] Rekam {record_duration} detik (ONLINE)...")
+            record_video(record_duration, filename)
+
+            print("[INFO] Coba upload ke server...")
+            success = upload_video(filename)
+
+            if not success:
+                timestamp = int(time.time())
+                offline_filename = os.path.join(PENDING_FOLDER, f"offline_{timestamp}.avi")
+                os.rename(filename, offline_filename)
+                print(f"[FAILOVER] Upload gagal, file dipindahkan ke {offline_filename}")
+            else:
+                if os.path.exists(filename):
+                    os.remove(filename)
+
+            print(f"[INFO] Jeda {pause_duration} detik (ONLINE)...")
+            time.sleep(pause_duration)
+
+        else:
+            record_duration = RECORD_DURATION
+            pause_duration = OFFLINE_SLEEP_DURATION
+            timestamp = int(time.time())
+            filepath = os.path.join(PENDING_FOLDER, f"offline_{timestamp}.avi")
+
+            print(f"[INFO] Rekam {record_duration} detik (OFFLINE)...")
+            record_video(record_duration, filepath)
+
+            if current_time - last_retry_time >= retry_interval:
+                print("[INFO] Waktu retry upload file offline (offline mode)...")
+                last_retry_time = current_time
+
+                if is_connected():
+                    print("[INFO] Koneksi ditemukan, mulai upload file offline...")
+                    upload_pending_files()
+                else:
+                    print("[INFO] Koneksi belum ada, tunggu retry berikutnya.")
+
+            print(f"[INFO] Jeda {pause_duration} detik (OFFLINE)...\n")
+            time.sleep(pause_duration)
+
+def gen_frames():
+    while True:
+        with camera_lock:
+            success, frame = cap.read()
+        if not success:
+            print("[WARNING] Gagal membaca frame streaming.")
+            break
+        else:
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route('/videos/list')
+def videos_list():
+    try:
+        if is_connected():
+            response = requests.get("https://pillbox-server-263713026348.asia-southeast2.run.app/videos/list")
+            return jsonify(response.json())
+        else:
+            files = [f for f in os.listdir(PENDING_FOLDER) if f.endswith('.avi')]
+            return jsonify({"video_files": files})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/video_gallery', methods=['GET'])
+def video_gallery():
+    return render_template('gallery.html')
 
-@app.route('/people_count')
-def get_people_count():
-    with frame_lock:
-        count = people_count
-    return jsonify({"people_count": count})
+@app.route('/path_live', methods=['GET'])
+def get_live_link():
+    try:
+        doc_ref = db.collection('pillbox').document('live')
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            link = data.get('link', None)
+            if link:
+                return jsonify({"link": link}), 200
+            else:
+                return jsonify({"error": "Field 'link' tidak ditemukan"}), 404
+        else:
+            return jsonify({"error": "Dokumen 'live' tidak ditemukan"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/videos/list/<date>')
+def videos_list_by_date(date):
+    try:
+        cloud_url = f"https://pillbox-server-263713026348.asia-southeast2.run.app/videos/list/{date}"
+        response = requests.get(cloud_url, timeout=10)
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/system_status')
 def system_status():
     try:
+        # CPU Load & Frequency
         cpu_load = psutil.cpu_percent(interval=1)
         cpu_freq = psutil.cpu_freq().current
+
+        # Memory
         mem = psutil.virtual_memory()
         memory_used = mem.used / (1024 ** 2)
         memory_total = mem.total / (1024 ** 2)
         memory_percent = mem.percent
 
+        # Temperature (Linux)
         cpu_temp = None
         try:
             if platform.system() == 'Linux':
@@ -88,10 +312,14 @@ def system_status():
         except Exception:
             cpu_temp = None
 
+        # Load average
         load_avg = os.getloadavg() if hasattr(os, 'getloadavg') else (0, 0, 0)
+
+        # Uptime
         uptime_seconds = time.time() - psutil.boot_time()
         uptime = time.strftime("%H:%M:%S", time.gmtime(uptime_seconds))
 
+        # Latency (ping Google)
         try:
             ping = subprocess.check_output(["ping", "-c", "1", "8.8.8.8"], universal_newlines=True)
             latency_line = [line for line in ping.split("\n") if "time=" in line][0]
@@ -114,28 +342,16 @@ def system_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/video_gallery')
-def video_gallery():
-    return render_template('gallery.html')
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/videos/list')
-def list_videos():
-    try:
-        files = [f for f in os.listdir(VIDEO_FOLDER) if f.endswith(('.mp4', '.avi'))]
-        return jsonify({"video_files": files})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+def start_recording_thread():
+    thread = threading.Thread(target=record_video_loop)
+    thread.daemon = True
+    thread.start()
 
-@app.route('/videos/list/<date>')
-def list_videos_by_date(date):
-    folder = os.path.join(VIDEO_FOLDER, date)
-    try:
-        if not os.path.exists(folder):
-            return jsonify({"video_files": []})
-        files = [f for f in os.listdir(folder) if f.endswith(('.mp4', '.avi'))]
-        return jsonify({"video_files": files})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+start_recording_thread()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
