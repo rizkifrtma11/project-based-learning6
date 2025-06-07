@@ -1,3 +1,4 @@
+# kode python streaming, record, dan upload ke gcs dengan real-time people counter MobilenetSSD
 from flask import Flask, Response, render_template, jsonify
 from flask_cors import CORS
 import cv2
@@ -13,6 +14,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import hmac
 import hashlib
+import numpy as np
 
 app = Flask(__name__)
 CORS(app)
@@ -40,6 +42,55 @@ SECRET_KEY = b"pillboxpnj234"  # byte string
 cred = credentials.Certificate("firebase.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+# Load MobileNetSSD model (pastikan path sesuai)
+prototxt_path = "models/MobileNetSSD_deploy.prototxt"
+model_path = "models/MobileNetSSD_deploy.caffemodel"
+net = cv2.dnn.readNetFromCaffe(prototxt_path, model_path)
+
+# COCO classes MobileNetSSD (harus sama dengan model)
+CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
+           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
+           "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
+           "sofa", "train", "tvmonitor"]
+
+def process_frame_with_mobilenetssd(frame):
+    """
+    Proses satu frame dengan MobileNetSSD untuk deteksi 'person'.
+    Mengembalikan frame dengan bounding box yang digambar.
+    """
+    h, w = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
+    net.setInput(blob)
+    detections = net.forward()
+
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        idx = int(detections[0, 0, i, 1])
+        if confidence > 0.5 and CLASSES[idx] == "person":
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+            label = f"Person: {confidence:.2f}"
+            cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+            cv2.putText(frame, label, (startX, startY - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    return frame
+
+def gen_frames():
+    while True:
+        with camera_lock:
+            success, frame = cap.read()
+        if not success:
+            print("[WARNING] Gagal membaca frame streaming.")
+            break
+        else:
+            # Proses frame dengan MobileNetSSD untuk deteksi 'person'
+            frame = process_frame_with_mobilenetssd(frame)
+
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 def is_connected(host="8.8.8.8", port=53, timeout=3):
     try:
@@ -230,19 +281,6 @@ def record_video_loop():
             print(f"[INFO] Jeda {pause_duration} detik (OFFLINE)...\n")
             time.sleep(pause_duration)
 
-def gen_frames():
-    while True:
-        with camera_lock:
-            success, frame = cap.read()
-        if not success:
-            print("[WARNING] Gagal membaca frame streaming.")
-            break
-        else:
-            ret, buffer = cv2.imencode('.jpg', frame)
-            frame = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -262,23 +300,6 @@ def videos_list():
 @app.route('/video_gallery', methods=['GET'])
 def video_gallery():
     return render_template('gallery.html')
-
-@app.route('/path_live', methods=['GET'])
-def get_live_link():
-    try:
-        doc_ref = db.collection('pillbox').document('live')
-        doc = doc_ref.get()
-        if doc.exists:
-            data = doc.to_dict()
-            link = data.get('link', None)
-            if link:
-                return jsonify({"link": link}), 200
-            else:
-                return jsonify({"error": "Field 'link' tidak ditemukan"}), 404
-        else:
-            return jsonify({"error": "Dokumen 'live' tidak ditemukan"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/videos/list/<date>')
 def videos_list_by_date(date):
